@@ -1,6 +1,6 @@
 // 黄果短剧 huangguoai.com
 // HTML 刮削源：首頁/分類/搜尋皆為 .hg-card-grid > .hg-drama-card 卡片；
-// 排行榜為 .hg-rank-list > .hg-rank-item；詳情頁 .hg-web-detail__ep-grid 給集數；
+// 排行榜為 .hg-rank-list > .hg-rank-item；播放詳情頁 .hg-web-play__ep-grid 給集數；
 // 播放頁 <script id="videoInitialData"> 內嵌 JSON，epPlaySrcs[集數] / videoSrc 直接給 m3u8。
 // 圖片解密方法：
 //   站點封面圖是 AES-128-CBC 加密位元組，key/iv 取自站點前端 crypto-worker.js：
@@ -89,6 +89,7 @@ function imgSrc(u) {
 
 function stripTags(s) {
     return String(s || '')
+        .replace(/<[^>]*\bclass="[^"]*\bsr-only\b[^"]*"[^>]*>[\s\S]*?<\/[^>]+>/gi, '')
         .replace(/<[^>]*>/g, '')
         .trim()
 }
@@ -131,7 +132,9 @@ function cardBlocks(slice) {
 }
 
 function parseCardBlock(block) {
-    const a = block.match(/href="[^"]*\/detail\/(\d+)\/[^"]*"/)
+    // 2026-09 站点将详情路径由 /detail/{id}/ 改成 /video/{id}/。
+    // 同时兼容旧路径，避免站点灰度发布期间再次返回空列表。
+    const a = block.match(/href="[^"]*\/(?:video|detail)\/(\d+)\/[^"]*"/)
     if (!a) return null
     const vid = a[1]
     const imgM = block.match(/data-src="([^"]+)"/) || block.match(/src="([^"]+)"/)
@@ -139,7 +142,7 @@ function parseCardBlock(block) {
     const t = block.match(/hg-drama-card__title[^>]*>([\s\S]*?)<\/a>/)
     if (t) title = stripTags(t[1])
     if (!title) {
-        const tt = block.match(/<a[^>]+href="[^"]*\/detail\/\d+\/"[^>]*>([\s\S]*?)<\/a>/)
+        const tt = block.match(/<a[^>]+href="[^"]*\/(?:video|detail)\/\d+\/"[^>]*>([\s\S]*?)<\/a>/)
         if (tt) title = stripTags(tt[1])
     }
     if (!title) return null
@@ -194,7 +197,7 @@ function parseRanks(html) {
         const to = i + 1 < starts.length ? starts[i + 1] : slice.length
         const block = slice.slice(starts[i], to)
         try {
-            const a = block.match(/href="[^"]*\/detail\/(\d+)\/[^"]*"/)
+            const a = block.match(/href="[^"]*\/(?:video|detail)\/(\d+)\/[^"]*"/)
             if (!a || seen[a[1]]) continue
             seen[a[1]] = true
             const imgM = block.match(/data-src="([^"]+)"/) || block.match(/src="([^"]+)"/)
@@ -202,7 +205,7 @@ function parseRanks(html) {
             const t = block.match(/hg-rank-item__title[^>]*>([\s\S]*?)<\/h2>/)
             if (t) title = stripTags(t[1])
             if (!title) {
-                const tt = block.match(/<a[^>]+href="[^"]*\/detail\/\d+\/"[^>]*>([\s\S]*?)<\/a>/)
+                const tt = block.match(/<a[^>]+href="[^"]*\/(?:video|detail)\/\d+\/"[^>]*>([\s\S]*?)<\/a>/)
                 if (tt) title = stripTags(tt[1])
             }
             if (!title) continue
@@ -259,9 +262,9 @@ async function getTracks(ext) {
     const id = ext.id || ''
     if (!id) return jsonify({ list: [] })
     try {
-        const html = await fetchHtml(SITE + '/detail/' + id + '/')
+        const html = await fetchHtml(SITE + '/video/' + id + '/')
         const tracks = []
-        const gridM = html.match(/<div\s+class="[^"]*\bhg-web-detail__ep-grid\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
+        const gridM = html.match(/<div\s+class="[^"]*\b(?:hg-web-play__ep-grid|hg-web-detail__ep-grid)\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
         if (gridM) {
             const are = /<a\b[^>]*>[\s\S]*?<\/a>/g
             let m
@@ -276,8 +279,24 @@ async function getTracks(ext) {
                 tracks.push({ name: name, ext: { url: fix(href), ep: eid } })
             }
         }
+        // 页面结构再次调整时，用内嵌 JSON 的 epPlaySrcs 作为集数兜底。
         if (!tracks.length) {
-            const playM = html.match(/<a\b[^>]*class="[^"]*\bhg-web-detail__play\b[^"]*"[^>]*href="([^"]+)"/)
+            const dataM = html.match(/id="videoInitialData"[^>]*>([\s\S]*?)<\/script>/)
+            if (dataM) {
+                try {
+                    const data = JSON.parse(dataM[1])
+                    const srcs = (data && data.epPlaySrcs) || {}
+                    Object.keys(srcs)
+                        .sort((a, b) => Number(a) - Number(b))
+                        .forEach((eid) => {
+                            const path = eid === '1' ? '/video/' + id + '/' : '/video/' + id + '/ep-' + eid + '/'
+                            tracks.push({ name: '第' + eid + '集', ext: { url: SITE + path, ep: eid } })
+                        })
+                } catch (e) {}
+            }
+        }
+        if (!tracks.length) {
+            const playM = html.match(/<a\b[^>]*class="[^"]*\b(?:hg-web-play__ep|hg-web-detail__play)\b[^"]*"[^>]*href="([^"]+)"/)
             if (playM) {
                 tracks.push({ name: '第1集', ext: { url: fix(playM[1]), ep: '' } })
             }
